@@ -1,0 +1,18 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Caché de Python
+__pycache__/
+*.pyc
+
+# Datos y salidas locales
+*.csv
+*.parquet
+*.xlsx
+outputs_*/
