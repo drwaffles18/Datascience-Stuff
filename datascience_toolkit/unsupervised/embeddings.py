@@ -98,23 +98,31 @@ class EmbeddingManager:
             "status": "created"
         })
 
-    def compute_tsne(self, perplexity: float = 30.0, learning_rate: str = "auto", max_iter: int = 1000) -> None:
-        """Generates 2D t-SNE projection."""
-        tsne = TSNE(perplexity=perplexity, learning_rate=learning_rate, max_iter=max_iter, n_components=2)
-        tsne_coords = tsne.fit_transform(self.data)
-        self.registry["tsne_visual"] = pd.DataFrame(
-            tsne_coords, columns=["tSNE1", "tSNE2"], index=self.data.index
-        )
-        self.models["tsne_visual"] = tsne
-        self.catalog.append({
-            "embedding": "tsne_visual",
-            "method": "tsne",
-            "n_components": 2,
-            "variance_explained": np.nan,
-            "parameters": f"perplexity={perplexity}, learning_rate={learning_rate}, max_iter={max_iter}",
-            "purpose": "visualization / local structure",
-            "status": "created"
-        })
+    def compute_tsne(
+            self,
+            n_components: int = 2,
+            perplexity: float = 30.0,
+            learning_rate: Any = "auto",
+            **kwargs
+        ) -> pd.DataFrame:
+            """Computes t-SNE projection supporting arbitrary sklearn parameters."""
+            tsne_params = {
+                "n_components": n_components,
+                "perplexity": perplexity,
+                "learning_rate": learning_rate,
+                "random_state": getattr(self, "random_state", 42),
+            }
+            # Integra init, metric, max_iter, etc.
+            tsne_params.update(kwargs)
+
+            tsne = TSNE(**tsne_params)
+            embedding = tsne.fit_transform(self.data)
+
+            cols = [f"TSNE_{i+1}" for i in range(n_components)]
+            emb_df = pd.DataFrame(embedding, columns=cols, index=self.data.index)
+            
+            self.registry["tsne"] = emb_df
+            return emb_df
 
     def get_catalog_df(self) -> pd.DataFrame:
         return pd.DataFrame(self.catalog)
