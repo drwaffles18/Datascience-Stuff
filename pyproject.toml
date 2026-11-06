@@ -22,5 +22,9 @@ dependencies = [
 advanced = [
     "umap-learn",
     "boto3",
-    "awswrangler"
+    "awswrangler",
+    "statsmodels"
 ]
+
+[tool.setuptools.packages.find]
+include = ["datascience_toolkit*"]

@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: datascience_toolkit
+Version: 0.1.0
+Summary: Modular Data Science toolkit for analytics, clustering and marketing activation
+Author: Victor
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scikit-learn
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: plotly
+Provides-Extra: advanced
+Requires-Dist: umap-learn; extra == "advanced"
+Requires-Dist: boto3; extra == "advanced"
+Requires-Dist: awswrangler; extra == "advanced"
+Requires-Dist: statsmodels; extra == "advanced"
+
+﻿# Datascience-Stuff
+
+Modular Data Science toolkit for analytics, clustering, and marketing activation.
