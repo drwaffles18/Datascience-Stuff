@@ -3,6 +3,7 @@ from .eda import EDAQuick
 from .unsupervised import UnsupervisedAnalysis
 from .marketing import AudienceProfiler, export_cluster_ids, generate_sql_in_clause
 from .supervised import ClassificationTournament, RegressionTournament
+from .timeseries import TimeSeriesDiagnostics, TimeSeriesFeatureExtractor, TimeSeriesTournament
 
 __all__ = [
     "DFPreprocess",
@@ -15,4 +16,7 @@ __all__ = [
     "generate_sql_in_clause",
     "ClassificationTournament",
     "RegressionTournament",
+    "TimeSeriesDiagnostics",
+    "TimeSeriesFeatureExtractor",
+    "TimeSeriesTournament",
 ]
