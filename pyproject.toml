@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datascience_toolkit"
+version = "0.1.0"
+description = "Modular Data Science toolkit for analytics, clustering and marketing activation"
+readme = "README.md"
+authors = [{ name = "Victor" }]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
+    "plotly"
+]
+
+[project.optional-dependencies]
+advanced = [
+    "umap-learn",
+    "boto3",
+    "awswrangler"
+]
