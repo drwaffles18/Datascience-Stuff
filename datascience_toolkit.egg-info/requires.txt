@@ -4,6 +4,7 @@ scikit-learn
 matplotlib
 seaborn
 plotly
+umap-learn>=0.5.0
 
 [advanced]
 umap-learn

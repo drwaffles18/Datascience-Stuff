@@ -11,6 +11,7 @@ Requires-Dist: scikit-learn
 Requires-Dist: matplotlib
 Requires-Dist: seaborn
 Requires-Dist: plotly
+Requires-Dist: umap-learn>=0.5.0
 Provides-Extra: advanced
 Requires-Dist: umap-learn; extra == "advanced"
 Requires-Dist: boto3; extra == "advanced"
