@@ -3,19 +3,204 @@ quick.py
 ========
 Exploratory data analysis for tabular datasets.
 Includes health metrics, missingness, cardinality, outlier detection,
-and automated correlation heatmaps.
+and automated interactive Plotly correlation and distribution charts.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import plotly.express as px
 
 try:
     from IPython.display import display
 except ImportError:
     display = print
+
+
+def edaquick(
+    df: pd.DataFrame,
+    target: Optional[str] = None,
+    corr_threshold: float = 0.80,
+    auto_categorical: bool = True
+) -> pd.DataFrame:
+    """
+    Inspección exploratoria rápida automatizada (EDA Quick).
+    Restaura el formato original con separadores formales, tablas estadísticas a 4 decimales
+    y visualizaciones interactivas de correlación y outliers en Plotly.
+    """
+    df_analyzed = df.copy()
+
+    # 0. Conversión automática de columnas object/string a category
+    if auto_categorical:
+        converted_cols = []
+        for col in df_analyzed.select_dtypes(include=["object", "string"]).columns:
+            df_analyzed[col] = df_analyzed[col].astype("category")
+            converted_cols.append(col)
+        if converted_cols:
+            print(f"Columnas convertidas a category: {converted_cols}")
+
+    # 1. DATASET INFO
+    print("========== DATASET INFO ==========")
+    n_rows, n_cols = df_analyzed.shape
+    mem_mb = df_analyzed.memory_usage(deep=True).sum() / (1024 * 1024)
+    dup_rows = int(df_analyzed.duplicated().sum())
+
+    n_numeric = len(df_analyzed.select_dtypes(include=[np.number]).columns)
+    n_categorical = len(df_analyzed.select_dtypes(include=["category"]).columns)
+    n_datetime = len(df_analyzed.select_dtypes(include=["datetime"]).columns)
+    n_boolean = len(df_analyzed.select_dtypes(include=["bool", "boolean"]).columns)
+    n_other = n_cols - (n_numeric + n_categorical + n_datetime + n_boolean)
+
+    print(f"rows: {n_rows}")
+    print(f"cols: {n_cols}")
+    print(f"memory_mb: {mem_mb:.2f}")
+    print(f"duplicates_rows: {dup_rows}")
+    print(f"target: {target}")
+    print(f"n_numeric: {n_numeric}")
+    print(f"n_categorical: {n_categorical}")
+    print(f"n_datetime: {n_datetime}")
+    print(f"n_boolean: {n_boolean}")
+    print(f"n_other: {n_other}")
+
+    # 2. SUMMARY (top)
+    print("\n========== SUMMARY (top) ==========")
+    summary_rows = []
+    for col in df_analyzed.columns:
+        n_null = int(df_analyzed[col].isnull().sum())
+        pct_null = (n_null / n_rows) * 100 if n_rows > 0 else 0.0
+        n_unique = int(df_analyzed[col].nunique())
+        pct_unique = (n_unique / n_rows) * 100 if n_rows > 0 else 0.0
+        summary_rows.append({
+            "feature": col,
+            "dtype": str(df_analyzed[col].dtype),
+            "n_null": n_null,
+            "pct_null": round(pct_null, 4),
+            "n_unique": n_unique,
+            "pct_unique": round(pct_unique, 4),
+        })
+    summary_df = pd.DataFrame(summary_rows).set_index("feature")
+    summary_df = summary_df.sort_values(by="n_unique", ascending=False)
+    display(summary_df)
+
+    # 3. MISSING VALUES
+    print("\n========== MISSING VALUES ==========")
+    null_counts = df_analyzed.isnull().sum()
+    if null_counts.sum() == 0:
+        print("No se detectaron valores faltantes.")
+    else:
+        missing_df = pd.DataFrame({
+            "feature": null_counts[null_counts > 0].index,
+            "n_null": null_counts[null_counts > 0].values,
+            "pct_null": ((null_counts[null_counts > 0].values / n_rows) * 100).round(4)
+        }).sort_values(by="n_null", ascending=False).reset_index(drop=True)
+        display(missing_df)
+
+    # 4. CARDINALITY
+    print("\n========== CARDINALITY ==========")
+    card_rows = []
+    for col in df_analyzed.columns:
+        n_unique = int(df_analyzed[col].nunique())
+        pct_unique = round((n_unique / n_rows) * 100, 4) if n_rows > 0 else 0.0
+        is_cat = str(df_analyzed[col].dtype) in ("category", "object")
+        is_constant = (n_unique <= 1)
+        is_high_cardinality = is_cat and (n_unique > 50)
+        is_id_like = (n_unique == n_rows) and not np.issubdtype(df_analyzed[col].dtype, np.floating)
+        card_rows.append({
+            "feature": col,
+            "dtype": str(df_analyzed[col].dtype),
+            "n_unique": n_unique,
+            "pct_unique": pct_unique,
+            "is_constant": is_constant,
+            "is_high_cardinality": is_high_cardinality,
+            "is_id_like": is_id_like
+        })
+    card_df = pd.DataFrame(card_rows).sort_values(by="n_unique", ascending=False).reset_index(drop=True)
+    display(card_df)
+
+    # 5. DESCRIBE (numeric)
+    print("\n========== DESCRIBE (numeric) ==========")
+    num_df = df_analyzed.select_dtypes(include=[np.number])
+    if not num_df.empty:
+        desc = num_df.describe().T.round(4)
+        display(desc)
+
+    # 6. CORRELATION
+    print("\n========== CORRELATION ==========")
+    if not num_df.empty and num_df.shape[1] > 1:
+        corr = num_df.corr(method="pearson")
+
+        # Matriz interactiva en Plotly con paleta plasma
+        fig_corr = px.imshow(
+            corr,
+            text_auto=True,
+            color_continuous_scale="plasma",
+            aspect="auto",
+            title="Correlación (pearson) — variables numéricas"
+        )
+        fig_corr.update_layout(
+            margin=dict(l=40, r=40, t=50, b=40),
+            height=380
+        )
+        fig_corr.show()
+
+        # Detección de pares con correlación fuerte
+        high_corr = []
+        cols = corr.columns.tolist()
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                val = corr.iloc[i, j]
+                if abs(val) >= corr_threshold:
+                    high_corr.append((cols[i], cols[j], val))
+
+        if not high_corr:
+            print(f"No se detectaron pares con |correlación| >= {corr_threshold:.2f}.")
+        else:
+            print(f"Pares con |correlación| >= {corr_threshold:.2f} ({len(high_corr)}):")
+            for col1, col2, val in high_corr:
+                print(f"- {col1} y {col2}: {val:.4f}")
+
+    # 7. OUTLIERS
+    print("\n========== OUTLIERS ==========")
+    if not num_df.empty:
+        outlier_rows = []
+        for col in num_df.columns:
+            series = num_df[col].dropna()
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            outliers = series[(series < lower_bound) | (series > upper_bound)]
+            n_outliers = int(len(outliers))
+            pct_outliers = (n_outliers / len(series)) * 100 if len(series) > 0 else 0.0
+
+            outlier_rows.append({
+                "feature": col,
+                "n": len(series),
+                "n_outliers": n_outliers,
+                "pct_outliers": round(pct_outliers, 4),
+                "lower_bound": round(lower_bound, 4),
+                "upper_bound": round(upper_bound, 4),
+                "min": round(float(series.min()), 4),
+                "max": round(float(series.max()), 4)
+            })
+        outlier_df = pd.DataFrame(outlier_rows).sort_values(by="n_outliers", ascending=False).reset_index(drop=True)
+        display(outlier_df)
+
+        # Boxplot interactivo en Plotly
+        fig_box = px.box(
+            num_df.melt(),
+            x="variable",
+            y="value",
+            title="Outliers — Boxplot (Plotly)"
+        )
+        fig_box.update_layout(
+            margin=dict(l=40, r=40, t=50, b=40),
+            height=400
+        )
+        fig_box.show()
+
+    return df_analyzed
 
 
 class EDAQuick:
@@ -31,9 +216,9 @@ class EDAQuick:
 
         for col in self.df.columns:
             series = self.df[col]
-            n_missing = series.isna().sum()
-            pct_missing = (n_missing / total_rows) * 100 if total_rows > 0 else 0
-            n_unique = series.nunique(dropna=True)
+            n_missing = int(series.isna().sum())
+            pct_missing = (n_missing / total_rows) * 100 if total_rows > 0 else 0.0
+            n_unique = int(series.nunique(dropna=True))
             dtype = str(series.dtype)
             sample_vals = series.dropna().unique()[:3].tolist()
 
@@ -106,7 +291,7 @@ class EDAQuick:
             lower_bound = q25 - factor * iqr
             upper_bound = q75 + factor * iqr
             n_outliers = int(((s < lower_bound) | (s > upper_bound)).sum())
-            pct_outliers = round((n_outliers / len(s)) * 100, 2) if len(s) > 0 else 0
+            pct_outliers = round((n_outliers / len(s)) * 100, 2) if len(s) > 0 else 0.0
 
             records.append({
                 "column": col,
@@ -120,57 +305,24 @@ class EDAQuick:
 
     def run_eda(
         self,
-        show_corr: bool = True,
-        show_outliers: bool = True,
-        show_missing: bool = True,
-        show_cardinality: bool = True,
-        show_target: bool = False,
-        show_predictive_power: bool = False,
-        target_col: Optional[str] = None
-    ) -> None:
-        """Orchestrates an automated exploratory diagnostic session."""
-        health_card = self.overview()
+        target_col: Optional[str] = None,
+        corr_threshold: float = 0.80,
+        auto_categorical: bool = True,
+        **kwargs
+    ) -> pd.DataFrame:
+        """Orchestrates an automated exploratory diagnostic session with original format and Plotly charts."""
+        return edaquick(
+            df=self.df,
+            target=target_col,
+            corr_threshold=corr_threshold,
+            auto_categorical=auto_categorical
+        )
 
-        if show_missing:
-            print("\n--- [1] MISSING VALUES REPORT ---")
-            missing_subset = health_card[health_card["missing_count"] > 0].reset_index(drop=True)
-            if not missing_subset.empty:
-                display(missing_subset[["column", "missing_count", "missing_pct"]])
-            else:
-                print("✓ No missing values detected in dataset.")
-
-        if show_cardinality:
-            print("\n--- [2] CARDINALITY & DATA TYPES ---")
-            display(health_card[["column", "dtype", "unique_count", "sample_values"]])
-
-        if show_outliers:
-            print("\n--- [3] OUTLIER DETECTION (IQR Rule 1.5x) ---")
-            outliers_df = self.detect_outliers()
-            display(outliers_df)
-
-        if show_corr:
-            num_df = self.df.select_dtypes(include=[np.number])
-            if num_df.shape[1] > 1:
-                print("\n--- [4] CORRELATION MATRIX ---")
-                corr = num_df.corr()
-                plt.figure(figsize=(10, 7))
-                sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", cbar=True, square=True)
-                plt.title("Numerical Feature Correlation Matrix", fontsize=12)
-                plt.tight_layout()
-                plt.show()
-            else:
-            
-                print("✓ Not enough numerical columns for correlation analysis.")
+    def __call__(self, *args, **kwargs) -> pd.DataFrame:
+        return self.run_eda(*args, **kwargs)
 
     def skewness_report(self, threshold: float = 0.5) -> pd.DataFrame:
-        """
-        Evaluates skewness across numeric features and suggests normalization transforms.
-        
-        Interpretation rules:
-        - |skew| <= 0.5: Approximately symmetric.
-        - 0.5 < |skew| <= 1.0: Moderately skewed.
-        - |skew| > 1.0: Highly skewed.
-        """
+        """Evaluates skewness across numeric features and suggests normalization transforms."""
         num_cols = self.df.select_dtypes(include=[np.number]).columns
         if len(num_cols) == 0:
             return pd.DataFrame()
