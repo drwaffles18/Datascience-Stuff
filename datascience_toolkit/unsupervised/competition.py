@@ -1,11 +1,12 @@
 """
 competition.py
 ==============
-Benchmarking module for comparing clustering quality across vector spaces.
-Evaluates clustering stability and separation metrics across geometric spaces and k ranges.
+Multi-space clustering competition engine.
+Benchmarks vector spaces across k ranges, consolidates geometric metrics,
+and computes consensus rankings.
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -19,7 +20,7 @@ from sklearn.metrics import (
 
 
 class SpaceCompetition:
-    """Benchmark engine comparing clustering performance across representation spaces."""
+    """Evaluates and compares clustering viability across different vector spaces."""
 
     @classmethod
     def evaluate(
@@ -29,40 +30,25 @@ class SpaceCompetition:
         method: str = "kmeans",
         k_range: range = range(2, 8),
         validation_label: Optional[pd.Series] = None,
-        n_init: int = 20,
-        max_iter: int = 300,
-        random_state: Optional[int] = None,
+        n_init: int = 50,
+        max_iter: int = 500,
+        tol: float = 1e-4,
+        random_state: Optional[int] = 42,
         **kwargs
     ) -> Dict[str, Any]:
-        """Runs clustering benchmarks across selected vector spaces and cluster counts."""
-        records = []
-        fitted_models: Dict[str, Any] = {}
-        labels_by_run: Dict[str, np.ndarray] = {}
+        valid_spaces = [s for s in requested_spaces if s in spaces]
+        if not valid_spaces:
+            raise ValueError(f"Ninguno de los espacios {requested_spaces} existe en el registro.")
 
-        # 1. Validar qué espacios solicitados están presentes en el registro
-        available_spaces = [s for s in requested_spaces if s in spaces]
-        missing_spaces = [s for s in requested_spaces if s not in spaces]
+        all_records = []
+        best_per_space = []
 
-        if missing_spaces:
-            print(f"⚠️ Espacios no encontrados en el registro y omitidos: {missing_spaces}")
-
-        if not available_spaces:
-            raise ValueError(
-                f"Ninguno de los espacios solicitados {requested_spaces} está disponible en el registro. "
-                f"Espacios disponibles: {list(spaces.keys())}"
-            )
-
-        # 2. Extraer parámetros específicos para KMeans admitiendo kwargs arbitrarios
-        tol = kwargs.pop("tol", 1e-4)
-
-        # 3. Torneo de clustering
-        for space_name in available_spaces:
+        for space_name in valid_spaces:
             X = spaces[space_name]
+            space_records = []
 
             for k in k_range:
-                run_key = f"{space_name}__k{k}"
-
-                if method.lower() == "kmeans":
+                if method.lower() in ("kmeans", "k-means"):
                     model = KMeans(
                         n_clusters=k,
                         n_init=n_init,
@@ -71,81 +57,84 @@ class SpaceCompetition:
                         random_state=random_state,
                         **kwargs
                     )
-                    cluster_labels = model.fit_predict(X)
+                    labels = model.fit_predict(X)
+                    inertia = float(model.inertia_)
+                    n_iter = int(model.n_iter_)
+                    converged = bool(n_iter < max_iter)
                 else:
-                    raise NotImplementedError(f"Método de clustering '{method}' no soportado todavía.")
+                    raise NotImplementedError(f"Método '{method}' aún no soportado en SpaceCompetition.")
 
-                # Métricas internas de validación geométrica
-                sil = float(silhouette_score(X, cluster_labels))
-                ch = float(calinski_harabasz_score(X, cluster_labels))
-                db = float(davies_bouldin_score(X, cluster_labels))
+                sil = float(silhouette_score(X, labels))
+                ch = float(calinski_harabasz_score(X, labels))
+                db = float(davies_bouldin_score(X, labels))
 
-                row = {
+                rec = {
                     "space": space_name,
+                    "method": method,
                     "k": k,
-                    "silhouette": round(sil, 4),
-                    "calinski_harabasz": round(ch, 2),
-                    "davies_bouldin": round(db, 4),
+                    "best_k": k,
+                    "silhouette": sil,
+                    "calinski_harabasz": ch,
+                    "davies_bouldin": db,
+                    "inertia": inertia,
+                    "n_iter": n_iter,
+                    "converged": converged,
                 }
 
-                # Métricas externas opcionales si se proporcionó validación externa (ground truth)
                 if validation_label is not None:
-                    valid_idx = validation_label.dropna().index.intersection(X.index)
-                    if len(valid_idx) > 0:
-                        y_true = validation_label.loc[valid_idx]
-                        y_pred = cluster_labels[X.index.get_indexer(valid_idx)]
-                        row["ari"] = round(float(adjusted_rand_score(y_true, y_pred)), 4)
-                        row["nmi"] = round(float(normalized_mutual_info_score(y_true, y_pred)), 4)
+                    val_idx = validation_label.dropna().index.intersection(X.index)
+                    if len(val_idx) > 0:
+                        y_true = validation_label.loc[val_idx]
+                        y_pred = labels[X.index.get_indexer(val_idx)]
+                        rec["ari"] = float(adjusted_rand_score(y_true, y_pred))
+                        rec["nmi"] = float(normalized_mutual_info_score(y_true, y_pred))
 
-                records.append(row)
-                fitted_models[run_key] = model
-                labels_by_run[run_key] = cluster_labels
+                space_records.append(rec)
+                all_records.append(rec)
 
-        leaderboard = pd.DataFrame(records)
+            # Seleccionar la mejor configuración para este espacio (por silueta)
+            space_df = pd.DataFrame(space_records)
+            best_row = space_df.sort_values(by="silhouette", ascending=False).iloc[0].to_dict()
+            best_per_space.append(best_row)
 
-        # Ordenar el leaderboard por Silhouette Score descendente
-        if not leaderboard.empty:
-            leaderboard = leaderboard.sort_values(by="silhouette", ascending=False).reset_index(drop=True)
+        summary_df = pd.DataFrame(best_per_space)
 
-        # 4. Generar interpretaciones automáticas
-        interpretations = cls._generate_interpretation(leaderboard)
+        # Cálculo de consensus_rank (promedio de los rangos ordinales de las métricas)
+        # Mayor silueta = mejor (1), Mayor CH = mejor (1), Menor DB = mejor (1)
+        rank_sil = summary_df["silhouette"].rank(ascending=False, method="min")
+        rank_ch = summary_df["calinski_harabasz"].rank(ascending=False, method="min")
+        rank_db = summary_df["davies_bouldin"].rank(ascending=True, method="min")
+
+        summary_df["consensus_rank"] = ((rank_sil + rank_ch + rank_db) / 3.0).round(6)
+
+        # Seleccionar y ordenar las columnas exactamente como en el contrato original
+        output_cols = [
+            "space", "method", "best_k", "silhouette", "calinski_harabasz",
+            "davies_bouldin", "inertia", "n_iter", "converged", "consensus_rank"
+        ]
+        if "ari" in summary_df.columns:
+            output_cols.append("ari")
+        if "nmi" in summary_df.columns:
+            output_cols.append("nmi")
+
+        leaderboard = summary_df[output_cols].sort_values(by="silhouette", ascending=False).reset_index(drop=True)
+
+        # Diagnóstico narrativo
+        interpretation = []
+        best_overall = leaderboard.iloc[0]
+        interpretation.append(
+            f"Configuración óptima global: Espacio '{best_overall['space']}' con k={int(best_overall['best_k'])} "
+            f"(Silhouette: {best_overall['silhouette']:.4f}, Davies-Bouldin: {best_overall['davies_bouldin']:.4f})."
+        )
+        for _, row in leaderboard.iterrows():
+            interpretation.append(
+                f"Espacio '{row['space']}': Mejor balance en k={int(row['best_k'])} (Silueta: {row['silhouette']:.4f})."
+            )
 
         return {
             "leaderboard": leaderboard,
-            "models": fitted_models,
-            "labels": labels_by_run,
-            "interpretation": interpretations,
+            "all_runs": pd.DataFrame(all_records),
+            "interpretation": interpretation,
+            "best_space": best_overall["space"],
+            "best_k": int(best_overall["best_k"])
         }
-
-    @staticmethod
-    def _generate_interpretation(df: pd.DataFrame) -> List[str]:
-        """Synthesizes high-level takeaways from benchmark metrics."""
-        if df.empty:
-            return ["No se generaron resultados para interpretar."]
-
-        takeaways = []
-
-        # Mejor configuración global por silueta
-        best_row = df.iloc[0]
-        takeaways.append(
-            f"Configuración óptima global: Espacio '{best_row['space']}' con k={int(best_row['k'])} "
-            f"(Silhouette: {best_row['silhouette']:.4f}, Davies-Bouldin: {best_row['davies_bouldin']:.4f})."
-        )
-
-        # Mejor k dentro de cada espacio evaluado
-        for space, grp in df.groupby("space", sort=False):
-            best_in_space = grp.sort_values(by="silhouette", ascending=False).iloc[0]
-            takeaways.append(
-                f"Espacio '{space}': Mejor balance en k={int(best_in_space['k'])} "
-                f"(Silueta: {best_in_space['silhouette']:.4f})."
-            )
-
-        # Indicador de Davies-Bouldin
-        best_db = df.sort_values(by="davies_bouldin", ascending=True).iloc[0]
-        if best_db["space"] != best_row["space"] or best_db["k"] != best_row["k"]:
-            takeaways.append(
-                f"Mayor compacidad de clústeres según Davies-Bouldin: Espacio '{best_db['space']}' con k={int(best_db['k'])} "
-                f"({best_db['davies_bouldin']:.4f})."
-            )
-
-        return takeaways

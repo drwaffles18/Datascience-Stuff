@@ -25,89 +25,112 @@ from .competition import SpaceCompetition
 from ..preprocessing import DFPreprocess
 
 
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
+
 class ExperimentResult(dict):
     """
     Contenedor de resultados del torneo de clustering compatible con acceso dict y atributo.
-    Proporciona métodos estratégicos para generar el leaderboard, plan de decisión,
-    explicación diagnóstica y extracción de artefactos.
+    Ejecuta el torneo diferido con .run(), renderiza la tabla de competición y calcula el leaderboard.
     """
+    def __init__(self, runner_fn=None, plan_df: Optional[pd.DataFrame] = None, *args, **kwargs):
+        dict.__init__(self, *args, **kwargs)
+        object.__setattr__(self, "_runner_fn", runner_fn)
+        object.__setattr__(self, "_is_executed", False)
+        object.__setattr__(self, "plan_df", plan_df if plan_df is not None else pd.DataFrame())
+
     def __getattr__(self, name: str) -> Any:
-        if name in self:
-            return self[name]
+        if name in self.__dict__:
+            return self.__dict__[name]
+        if dict.__contains__(self, name):
+            return dict.__getitem__(self, name)
+        if not self._is_executed and self._runner_fn is not None:
+            self.run(verbose=False)
+            if dict.__contains__(self, name):
+                return dict.__getitem__(self, name)
         raise AttributeError(f"'ExperimentResult' no contiene el atributo '{name}'")
 
     def __setattr__(self, name: str, value: Any) -> None:
-        self[name] = value
+        if name.startswith("_") or name == "plan_df":
+            object.__setattr__(self, name, value)
+        else:
+            self[name] = value
+
+    def __getitem__(self, key: Any) -> Any:
+        if not self._is_executed and not dict.__contains__(self, key) and self._runner_fn is not None:
+            self.run(verbose=False)
+        return dict.__getitem__(self, key)
+
+    def run(self, verbose: bool = True) -> "ExperimentResult":
+        """Ejecuta el torneo de modelos, muestra la tabla completa de la competición y consolida métricas."""
+        from IPython.display import display
+
+        if not self._is_executed and self._runner_fn is not None:
+            results = self._runner_fn()
+            self.update(results)
+            object.__setattr__(self, "_is_executed", True)
+
+        lb = self.get("leaderboard", pd.DataFrame())
+
+        if verbose and not lb.empty:
+            print("========== CLUSTERING COMPETITION ==========")
+            with pd.option_context("display.max_colwidth", None):
+                display(lb)
+
+        return self
 
     def leaderboard(self, top_n: Optional[int] = None) -> pd.DataFrame:
-        """Retorna el DataFrame del leaderboard ordenado por métrica."""
+        """Retorna el DataFrame del leaderboard ordenado por puntaje de competición."""
+        if not self._is_executed and self._runner_fn is not None:
+            self.run(verbose=False)
         lb = dict.get(self, "leaderboard", pd.DataFrame())
         if top_n is not None and isinstance(lb, pd.DataFrame):
             return lb.head(top_n)
         return lb
 
-    def run(self, verbose: bool = True) -> "ExperimentResult":
-        """
-        Ejecuta y consolida la competición de clustering retornando el objeto
-        con todos los modelos entrenados, métricas y ranking final.
-        """
-        if verbose:
-            print("=" * 65)
-            print("✓ CLUSTERING COMPETITION COMPLETED")
-            print("=" * 65)
-            lb = self.leaderboard()
-            if not lb.empty:
-                best = lb.iloc[0]
-                print(f"- Configuración campeona: {best['space']} | {best['model'].upper()} | k={int(best['k'])}")
-                print(f"- Silhouette Score:       {best['silhouette']:.4f}")
-                print(f"- Davies-Bouldin:         {best['davies_bouldin']:.4f}")
-                if "stability" in best:
-                    print(f"- Estabilidad (ARI):      {best['stability']:.4f}")
-            print("=" * 65)
-        return self
-
     def plan(self, top_n: int = 5) -> pd.DataFrame:
-        """Genera un plan de decisión comparativo y accionable."""
+        """Genera un plan de decisión comparativo y accionable post-competición."""
+        if not self._is_executed and self._runner_fn is not None:
+            self.run(verbose=False)
         lb = self.leaderboard().copy()
         if lb.empty:
             return pd.DataFrame()
 
-        has_stability = "stability" in lb.columns
         candidates = []
         seen_keys = set()
 
         def add_candidate(row, role, rationale, next_step):
-            key = (row["space"], row["model"], int(row["k"]))
+            k_val = row.get("n_clusters", row.get("k", 2))
+            key = (row["space"], row["model"], int(k_val))
             if key not in seen_keys:
                 seen_keys.add(key)
                 rec = {
                     "role": role,
                     "space": row["space"],
                     "model": row["model"],
-                    "k": int(row["k"]),
+                    "k": int(k_val),
                     "silhouette": row["silhouette"],
                     "davies_bouldin": row["davies_bouldin"],
+                    "stability": row.get("stability_ari", row.get("stability", np.nan)),
+                    "strategic_rationale": rationale,
+                    "next_action": next_step
                 }
-                if has_stability:
-                    rec["stability"] = row.get("stability", np.nan)
-                rec["strategic_rationale"] = rationale
-                rec["next_action"] = next_step
                 candidates.append(rec)
 
         best = lb.iloc[0]
         add_candidate(
             best,
             "Primary Champion",
-            f"Mayor puntuación global de silueta ({best['silhouette']:.4f}). Estructura geométrica más nítida.",
+            f"Mayor puntuación global en el torneo (Score: {best.get('competition_score', 'N/A')}, Silueta: {best['silhouette']:.4f}).",
             "Proceder a perfilamiento de arquetipos y análisis de medias por clúster."
         )
 
-        if has_stability and "stability" in lb.columns:
-            best_stab = lb.sort_values(by="stability", ascending=False).iloc[0]
+        if "stability_ari" in lb.columns:
+            best_stab = lb.sort_values(by="stability_ari", ascending=False).iloc[0]
             add_candidate(
                 best_stab,
                 "Stability Champion",
-                f"Máxima consistencia en remuestreo/semillas (ARI: {best_stab['stability']:.4f}). Clústeres reproducibles.",
+                f"Máxima consistencia (ARI: {best_stab['stability_ari']:.4f}).",
                 "Usar si la reproducibilidad en producción es prioritaria sobre la separación pura."
             )
 
@@ -115,30 +138,9 @@ class ExperimentResult(dict):
         add_candidate(
             best_db,
             "Compactness Champion",
-            f"Mínima dispersión intra-clúster y máxima separación inter-centroide (DB: {best_db['davies_bouldin']:.4f}).",
+            f"Mínima dispersión intra-clúster (DB: {best_db['davies_bouldin']:.4f}).",
             "Examinar fronteras de decisión y dispersión de outliers."
         )
-
-        low_k = lb[lb["k"].isin([2, 3])]
-        if not low_k.empty:
-            best_low = low_k.sort_values(by="silhouette", ascending=False).iloc[0]
-            add_candidate(
-                best_low,
-                "Parsimony Pick (Low k)",
-                f"Configuración de baja complejidad (k={int(best_low['k'])}) con silueta {best_low['silhouette']:.4f}.",
-                "Ideal si el negocio requiere segmentación comercial simple y altamente accionable."
-            )
-
-        primary_space = best["space"]
-        alt_spaces = lb[lb["space"] != primary_space]
-        if not alt_spaces.empty:
-            best_alt = alt_spaces.sort_values(by="silhouette", ascending=False).iloc[0]
-            add_candidate(
-                best_alt,
-                f"Alt Space ({best_alt['space']})",
-                f"Mejor opción en espacio alternativo con silueta {best_alt['silhouette']:.4f}.",
-                "Comparar solapamiento de asignaciones con el campeón primario (ARI cruzado)."
-            )
 
         for _, row in lb.iterrows():
             if len(candidates) >= top_n:
@@ -154,13 +156,15 @@ class ExperimentResult(dict):
 
     def explain(self) -> None:
         """Imprime un diagnóstico analítico y narrativo detallado sobre el torneo."""
+        if not self._is_executed and self._runner_fn is not None:
+            self.run(verbose=False)
         lb = self.leaderboard()
         if lb.empty:
             print("No hay resultados registrados en el experimento para explicar.")
             return
 
         best = lb.iloc[0]
-        has_stability = "stability" in lb.columns
+        k_val = best.get("n_clusters", best.get("k", 2))
 
         print("=" * 75)
         print("📊 CLUSTERING EXPERIMENT DIAGNOSIS & INTERPRETATION")
@@ -168,78 +172,18 @@ class ExperimentResult(dict):
         print("\n1. CONFIGURACIÓN GANADORA (CHAMPION)")
         print(f"   - Espacio vectorial:   {best['space']}")
         print(f"   - Familia de modelo:   {best['model'].upper()}")
-        print(f"   - Número de clusters:  k = {int(best['k'])}")
-        print(f"   - Silhouette Score:    {best['silhouette']:.4f} (Separación global)")
-        print(f"   - Davies-Bouldin:      {best['davies_bouldin']:.4f} (Compacidad)")
-        if has_stability:
-            print(f"   - Estabilidad (ARI):   {best['stability']:.4f}")
-
-        print("\n2. IMPACTO DEL ESPACIO DE REPRESENTACIÓN")
-        space_summary = lb.groupby("space")["silhouette"].agg(["mean", "max"]).round(4)
-        for space, row in space_summary.iterrows():
-            print(f"   - '{space}': Silueta promedio = {row['mean']:.4f} | Silueta máxima = {row['max']:.4f}")
-
-        if len(space_summary) > 1:
-            best_space = space_summary["max"].idxmax()
-            other_spaces = [s for s in space_summary.index if s != best_space]
-            print(f"   → El espacio '{best_space}' superó a {other_spaces}, confirmando que la reducción")
-            print("     dimensional filtró ruido y mejoró el contraste de distancias.")
-
-        print("\n3. DINÁMICA POR FAMILIA DE ALGORITMOS")
-        model_summary = lb.groupby("model")["silhouette"].agg(["mean", "max"]).round(4)
-        for model_name, row in model_summary.iterrows():
-            print(f"   - {model_name.upper():<14}: Silueta promedio = {row['mean']:.4f} | Máxima = {row['max']:.4f}")
-
-        if has_stability:
-            print("\n4. EVALUACIÓN DE ESTABILIDAD Y REPRODUCIBILIDAD")
-            top_stab = lb.sort_values(by="stability", ascending=False).iloc[0]
-            print(f"   - Configuración más estable: {top_stab['space']} | {top_stab['model']} | k={int(top_stab['k'])} (ARI={top_stab['stability']:.4f})")
-
-        print("\n5. RECOMENDACIONES TÁCTICAS")
-        print(f"   - Adoptar '{best['model']}' con k={int(best['k'])} en el espacio '{best['space']}' como segmentación base.")
-        print("   - Realizar perfilamiento de variables continuas y categóricas para validar la interpretación cualitativa.")
+        print(f"   - Número de clusters:  k = {int(k_val)}")
+        print(f"   - Silhouette Score:    {best['silhouette']:.4f}")
+        print(f"   - Davies-Bouldin:      {best['davies_bouldin']:.4f}")
+        if "stability_ari" in best:
+            print(f"   - Estabilidad (ARI):   {best['stability_ari']:.4f}")
         print("=" * 75)
-
-    def get_labels(
-        self,
-        space: Optional[str] = None,
-        model: Optional[str] = None,
-        k: Optional[int] = None
-    ) -> np.ndarray:
-        """Retorna las etiquetas de clúster para una configuración dada o el campeón."""
-        if space is None or model is None or k is None:
-            best = self.get("best_config", {})
-            space = space or best.get("space")
-            model = model or best.get("model")
-            k = k or best.get("k")
-
-        run_key = f"{space}__{model}__k{int(k)}"
-        labels_dict = self.get("labels", {})
-        if run_key in labels_dict:
-            return labels_dict[run_key]
-        raise KeyError(f"No se encontraron etiquetas para '{run_key}'.")
-
-    def get_model(
-        self,
-        space: Optional[str] = None,
-        model: Optional[str] = None,
-        k: Optional[int] = None
-    ) -> Any:
-        """Retorna el modelo ajustado para una configuración dada o el campeón."""
-        if space is None or model is None or k is None:
-            return self.get("best_model")
-        run_key = f"{space}__{model}__k{int(k)}"
-        models_dict = self.get("models", {})
-        if run_key in models_dict:
-            return models_dict[run_key]
-        raise KeyError(f"No se encontró el modelo para '{run_key}'.")
-
 
 class ClusterSolution(dict):
     """
     Contenedor de la solución final de clustering ajustada.
     Permite acceso transparente como atributo y diccionario, e incorpora
-    métodos rápidos de perfilamiento y conteo.
+    métodos de perfilamiento, conteo, extracción de datos y graficación de arquetipos.
     """
     def __getattr__(self, name: str) -> Any:
         if name in self:
@@ -249,9 +193,26 @@ class ClusterSolution(dict):
     def __setattr__(self, name: str, value: Any) -> None:
         self[name] = value
 
+    def dataset(self, which: str = "raw") -> pd.DataFrame:
+        """
+        Retorna el DataFrame con la columna de clústeres incorporada.
+        Garantiza que la columna 'cluster' siempre esté presente.
+        """
+        if which.lower() in ("prepared", "prep", "features"):
+            df = self.get("prep_with_clusters", self.get("data_with_clusters"))
+        else:
+            df = self.get("data_with_clusters")
+
+        if df is not None:
+            df = df.copy()
+            if "cluster" not in df.columns and "labels" in self:
+                df["cluster"] = self["labels"].values
+            return df
+        return pd.DataFrame()
+
     def summary(self) -> pd.DataFrame:
         """Retorna la distribución de frecuencias y porcentajes por clúster."""
-        labels = self.get("labels", pd.Series())
+        labels = self.get("labels", pd.Series(dtype=int))
         counts = labels.value_counts().sort_index()
         pcts = (labels.value_counts(normalize=True).sort_index() * 100).round(2)
         return pd.DataFrame({"count": counts, "percentage": pcts})
@@ -262,8 +223,195 @@ class ClusterSolution(dict):
         if target_df is None:
             return pd.DataFrame()
         num_df = target_df.select_dtypes(include=[np.number]).copy()
-        num_df["cluster"] = self["labels"]
+
+        cols_to_drop = [c for c in ["cluster", self.get("name", "")] if c in num_df.columns]
+        if cols_to_drop:
+            num_df = num_df.drop(columns=cols_to_drop)
+
+        num_df["cluster"] = np.asarray(self["labels"])
         return num_df.groupby("cluster").mean().round(3)
+
+    def describe(
+        self,
+        top_n: int = 5,
+        min_abs_z: float = 0.4,
+        which: str = "raw",
+        verbose: bool = True
+    ) -> pd.DataFrame:
+        """
+        Genera el perfil diferencial de cada clúster basándose en el Z-Score
+        respecto a la media poblacional.
+        """
+        target_df = self.get("raw_data" if which == "raw" else "prepared_data")
+        if target_df is None:
+            target_df = self.get("data_with_clusters")
+
+        labels = self.get("labels")
+        if labels is None or target_df is None:
+            return pd.DataFrame()
+
+        num_df = target_df.select_dtypes(include=[np.number]).copy()
+        cols_to_drop = [c for c in ["cluster", self.get("name", "")] if c in num_df.columns]
+        if cols_to_drop:
+            num_df = num_df.drop(columns=cols_to_drop)
+
+        global_means = num_df.mean()
+        global_stds = num_df.std(ddof=0).replace(0, np.nan)
+
+        records = []
+        cluster_ids = sorted(pd.Series(labels).unique())
+
+        for c_id in cluster_ids:
+            c_mask = (np.asarray(labels) == c_id)
+            c_df = num_df.iloc[c_mask]
+            c_means = c_df.mean()
+
+            z_scores = (c_means - global_means) / global_stds
+            filtered_z = z_scores[z_scores.abs() >= min_abs_z]
+            top_features = filtered_z.abs().sort_values(ascending=False).head(top_n).index
+
+            for feat in top_features:
+                z_val = z_scores[feat]
+                records.append({
+                    "cluster": c_id,
+                    "feature": feat,
+                    "cluster_mean": round(float(c_means[feat]), 3),
+                    "global_mean": round(float(global_means[feat]), 3),
+                    "z_score": round(float(z_val), 3),
+                    "direction": "High (+)" if z_val > 0 else "Low (-)"
+                })
+
+        result_df = pd.DataFrame(records)
+
+        if verbose and not result_df.empty:
+            print("=" * 70)
+            print("📋 DISTINCTIVE CLUSTER PROFILES (Z-SCORE DIFFERENTIAL)")
+            print("=" * 70)
+            for c_id in cluster_ids:
+                c_rows = result_df[result_df["cluster"] == c_id]
+                size = int((np.asarray(labels) == c_id).sum())
+                pct = (size / len(labels)) * 100
+                print(f"\n🔹 Clúster {c_id} ({size} observaciones, {pct:.1f}%):")
+                if c_rows.empty:
+                    print(f"   (Sin variables que superen |z| >= {min_abs_z})")
+                else:
+                    for _, r in c_rows.iterrows():
+                        arrow = "▲" if r["z_score"] > 0 else "▼"
+                        print(f"   {arrow} {r['feature']:<25} | z = {r['z_score']:+.2f} | Clúster: {r['cluster_mean']} (Global: {r['global_mean']})")
+            print("=" * 70)
+
+        return result_df
+
+    def _get_cluster_means(self, normalize: Union[bool, str] = True, which: str = "raw") -> pd.DataFrame:
+        """Calcula las medias de variables por clúster con o sin normalización."""
+        target_df = self.get("raw_data" if which == "raw" else "prepared_data")
+        if target_df is None:
+            target_df = self.get("data_with_clusters")
+
+        num_df = target_df.select_dtypes(include=[np.number]).copy()
+        cols_to_drop = [c for c in ["cluster", self.get("name", "")] if c in num_df.columns]
+        if cols_to_drop:
+            num_df = num_df.drop(columns=cols_to_drop)
+
+        if normalize in (True, "minmax"):
+            denom = (num_df.max() - num_df.min()).replace(0, np.nan)
+            scaled_df = (num_df - num_df.min()) / denom
+        elif normalize in ("zscore", "standard"):
+            stds = num_df.std(ddof=0).replace(0, np.nan)
+            scaled_df = (num_df - num_df.mean()) / stds
+        else:
+            scaled_df = num_df.copy()
+
+        scaled_df["cluster"] = np.asarray(self["labels"])
+        return scaled_df.groupby("cluster").mean()
+
+    def plot_cluster_bars(
+        self,
+        normalize: Union[bool, str] = True,
+        which: str = "raw",
+        figsize: Optional[Tuple[float, float]] = None
+    ) -> None:
+        """
+        Genera gráficos de barras horizontales comparativos por clúster ordenados
+        por los valores del clúster de referencia.
+        """
+        import matplotlib.pyplot as plt
+
+        means = self._get_cluster_means(normalize=normalize, which=which)
+        cluster_ids = sorted(means.index)
+        k = len(cluster_ids)
+
+        # Ordenar características según los valores del Cluster 0 de forma descendente
+        sort_cluster = cluster_ids[0]
+        feature_order = means.loc[sort_cluster].sort_values(ascending=False).index.tolist()
+
+        fig_size = figsize or (4 * k, max(4.5, len(feature_order) * 0.45))
+        fig, axes = plt.subplots(1, k, figsize=fig_size, sharey=True)
+        if k == 1:
+            axes = [axes]
+
+        sol_name = self.get("name", "cluster_solution")
+        fig.suptitle(f"{sol_name} — centroides por cluster", fontsize=14, fontweight="bold", y=0.98)
+
+        x_label = "scaled" if normalize else "mean"
+        for c_id, ax in zip(cluster_ids, axes):
+            c_vals = means.loc[c_id, feature_order]
+            ax.barh(feature_order, c_vals)
+            ax.invert_yaxis()
+            ax.set_title(f"Cluster {c_id}")
+            ax.set_xlabel(x_label)
+            if normalize in (True, "minmax"):
+                ax.set_xlim(0, 1.05)
+                ax.set_xticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_cluster_radar(
+        self,
+        normalize: Union[bool, str] = "minmax",
+        which: str = "raw",
+        figsize: Optional[Tuple[float, float]] = None
+    ) -> None:
+        """
+        Genera el gráfico polar radar superponiendo los perfiles de todos los clústeres.
+        """
+        import matplotlib.pyplot as plt
+
+        means = self._get_cluster_means(normalize=normalize, which=which)
+        cluster_ids = sorted(means.index)
+        features = means.columns.tolist()
+        num_vars = len(features)
+
+        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+        angles_closed = angles + [angles[0]]
+
+        fig_size = figsize or (6.5, 6.5)
+        fig, ax = plt.subplots(figsize=fig_size, subplot_kw=dict(polar=True))
+
+        ax.set_theta_offset(np.pi / 2)
+        ax.set_theta_direction(-1)
+        ax.set_xticks(angles)
+        ax.set_xticklabels(features, fontsize=9)
+        ax.set_rlabel_position(0)
+
+        if normalize in (True, "minmax"):
+            ax.set_ylim(0, 1.05)
+            ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+            ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=8)
+
+        for c_id in cluster_ids:
+            values = means.loc[c_id, features].tolist()
+            values_closed = values + [values[0]]
+            ax.plot(angles_closed, values_closed, label=f"Cluster {c_id}", linewidth=1.2)
+            ax.fill(angles_closed, values_closed, alpha=0.2)
+
+        sol_name = self.get("name", "cluster_solution")
+        ax.set_title(f"{sol_name} — perfil radar", fontsize=11, pad=25)
+        ax.legend(loc="upper right", bbox_to_anchor=(1.15, 1.15))
+
+        plt.tight_layout()
+        plt.show()
 
 class UnsupervisedAnalysis:
     """Unified API for unsupervised clustering workflows."""
@@ -278,6 +426,7 @@ class UnsupervisedAnalysis:
         self.manager.registry["embed"] = self.data
         self.last_competition: Optional[Dict[str, Any]] = None
         self.last_experiment: Optional[ExperimentResult] = None
+        self.last_solution: Optional[ClusterSolution] = None
 
     def prepare(
         self,
@@ -310,7 +459,6 @@ class UnsupervisedAnalysis:
         self.prepared_data_ = self.preprocessor.fit_transform(df_to_prep)
         self.data = self.prepared_data_.copy()
 
-        # Actualizar el gestor de embeddings con la matriz transformada
         self.manager = EmbeddingManager(self.data)
         self.manager.registry["embed"] = self.data
 
@@ -418,8 +566,27 @@ class UnsupervisedAnalysis:
         return comp_output
 
     def available_cluster_models(self) -> pd.DataFrame:
-        """Cataloga los modelos de clustering soportados y valida dinamicamente dependencias."""
+        """
+        Cataloga los 6 modelos de clustering soportados respetando el esquema
+        original de 8 columnas y validación dinámica de librerías opcionales.
+        """
+        # Validación dinámica de kmedoids
+        kmedoids_available = False
+        kmedoids_note = ""
+        try:
+            from sklearn_extra.cluster import KMedoids  # type: ignore
+            kmedoids_available = True
+        except ImportError:
+            try:
+                import kmedoids  # type: ignore
+                kmedoids_available = True
+            except ImportError:
+                kmedoids_available = False
+                kmedoids_note = "optional dependency; install via pip install scikit-learn-extra"
+
+        # Validación dinámica de hdbscan
         hdbscan_available = False
+        hdbscan_note = ""
         try:
             from sklearn.cluster import HDBSCAN  # type: ignore
             hdbscan_available = True
@@ -429,42 +596,68 @@ class UnsupervisedAnalysis:
                 hdbscan_available = True
             except ImportError:
                 hdbscan_available = False
+                hdbscan_note = "optional dependency; install via pip install hdbscan"
 
         models_catalog = [
             {
                 "model": "kmeans",
-                "algorithm": "K-Means",
-                "family": "Centroid-based",
-                "status": "Available",
-                "notes": "Incluido en scikit-learn. Adecuado para grupos esfericos e hiper-esfericos."
+                "family": "centroid",
+                "available": True,
+                "requires_k": True,
+                "supports_noise": False,
+                "recommended_for": "scaled numeric data; compact clusters; large datasets",
+                "limitations": "requires k; sensitive to outliers and non-spherical geometries",
+                "note": ""
             },
             {
-                "model": "hierarchical",
-                "algorithm": "Agglomerative Clustering",
-                "family": "Hierarchical",
-                "status": "Available",
-                "notes": "Incluido en scikit-learn. Soporta enlaces 'ward', 'complete' y 'average'."
+                "model": "kmedoids",
+                "family": "medoid",
+                "available": kmedoids_available,
+                "requires_k": True,
+                "supports_noise": False,
+                "recommended_for": "outlier-prone data; non-euclidean distances; small/medium datasets",
+                "limitations": "slower than kmeans; optional sklearn-extra dependency",
+                "note": kmedoids_note
             },
             {
-                "model": "gmm",
-                "algorithm": "Gaussian Mixture Models",
-                "family": "Probabilistic / Density",
-                "status": "Available",
-                "notes": "Incluido en scikit-learn. Clustering probabilistico suave (soft clustering)."
+                "model": "agglomerative",
+                "family": "hierarchical",
+                "available": True,
+                "requires_k": True,
+                "supports_noise": False,
+                "recommended_for": "small/medium datasets; hierarchical structure; deterministic clustering",
+                "limitations": "no native predict; memory cost grows with sample size",
+                "note": ""
+            },
+            {
+                "model": "gaussian_mixture",
+                "family": "probabilistic",
+                "available": True,
+                "requires_k": True,
+                "supports_noise": False,
+                "recommended_for": "elliptical clusters; overlapping segments; soft membership",
+                "limitations": "distributional assumptions; can converge to local optima",
+                "note": ""
             },
             {
                 "model": "dbscan",
-                "algorithm": "DBSCAN",
-                "family": "Density-based",
-                "status": "Available",
-                "notes": "Incluido en scikit-learn. Detecta ruido y clústeres de forma arbitraria."
+                "family": "density",
+                "available": True,
+                "requires_k": False,
+                "supports_noise": True,
+                "recommended_for": "irregular shapes; noise detection; unknown number of clusters",
+                "limitations": "sensitive to eps; struggles with varying density",
+                "note": ""
             },
             {
                 "model": "hdbscan",
-                "algorithm": "HDBSCAN",
-                "family": "Hierarchical Density-based",
-                "status": "Available" if hdbscan_available else "Missing dependency",
-                "notes": "Listo para usarse." if hdbscan_available else "Requiere instalacion: ejecuta '%pip install hdbscan'."
+                "family": "density",
+                "available": hdbscan_available,
+                "requires_k": False,
+                "supports_noise": True,
+                "recommended_for": "varying densities; noise detection; unknown number of clusters",
+                "limitations": "optional dependency; small samples may be unstable",
+                "note": hdbscan_note
             }
         ]
 
@@ -631,12 +824,16 @@ class UnsupervisedAnalysis:
             "davies_bouldin": round(db, 4),
         }
 
-        # 4. Construir datasets etiquetados
+        # 4. Construir datasets etiquetados respetando el contrato original
         data_with_clusters = self.raw_data.copy()
-        data_with_clusters[name] = labels_series
+        data_with_clusters["cluster"] = labels_arr
+        if name and name != "cluster":
+            data_with_clusters[name] = labels_arr
 
         prep_with_clusters = self.data.copy()
-        prep_with_clusters[name] = labels_series
+        prep_with_clusters["cluster"] = labels_arr
+        if name and name != "cluster":
+            prep_with_clusters[name] = labels_arr
 
         solution = ClusterSolution({
             "name": name,
@@ -673,181 +870,354 @@ class UnsupervisedAnalysis:
         self,
         spaces: List[str],
         models: Union[str, List[str]] = "recommended",
-        k_range: range = range(2, 8),
-        evaluate_stability: bool = False,
+        k_range: range = range(2, 11),
+        evaluate_stability: bool = True,
         n_stability_runs: int = 5,
         n_init: int = 50,
         max_iter: int = 500,
         tol: float = 1e-4,
         random_state: Optional[int] = None,
         master_seed: Optional[int] = None,
+        verbose: bool = True,
         **kwargs
     ) -> ExperimentResult:
         """
-        Ejecuta un torneo multiespacio y multimodelo evaluando separación geométrica
-        y estabilidad de agrupamiento.
+        Construye el plan del experimento de clustering (Fase 1) y define el motor
+        de la competición para ejecutar la parrilla de modelos completa en .run() (Fase 2).
         """
-        if "embed" not in self.manager.registry:
-            self.manager.registry["embed"] = self.data
+        from IPython.display import display
 
-        valid_spaces = [s for s in spaces if s in self.manager.registry]
-        if not valid_spaces:
-            raise ValueError(
-                f"Ninguno de los espacios {spaces} existe en el registro. "
-                f"Disponibles: {list(self.manager.registry.keys())}"
-            )
+        # 1. Validación de dependencias opcionales
+        kmedoids_avail = False
+        kmedoids_driver = None
+        try:
+            from sklearn_extra.cluster import KMedoids  # type: ignore
+            kmedoids_avail = True
+            kmedoids_driver = "sklearn_extra"
+        except ImportError:
+            try:
+                import kmedoids  # type: ignore
+                kmedoids_avail = True
+                kmedoids_driver = "kmedoids"
+            except ImportError:
+                pass
 
-        if models == "recommended":
-            target_models = ["kmeans", "hierarchical", "gmm"]
-        elif isinstance(models, str):
-            target_models = [models.lower()]
-        else:
-            target_models = [m.lower() for m in models]
+        hdbscan_avail = False
+        hdbscan_cls = None
+        try:
+            from sklearn.cluster import HDBSCAN  # type: ignore
+            hdbscan_avail = True
+            hdbscan_cls = HDBSCAN
+        except ImportError:
+            try:
+                import hdbscan  # type: ignore
+                hdbscan_avail = True
+                hdbscan_cls = hdbscan.HDBSCAN
+            except ImportError:
+                pass
 
-        base_seed = master_seed or random_state or 42
-        records = []
-        fitted_models: Dict[str, Any] = {}
-        labels_by_run: Dict[str, np.ndarray] = {}
+        n_samples, n_features = self.data.shape
 
-        for space_name in valid_spaces:
-            X = self.manager.registry[space_name]
+        # Detección de outliers
+        num_cols = self.data.select_dtypes(include=[np.number])
+        has_outliers = False
+        for c in num_cols.columns:
+            s = num_cols[c].dropna()
+            iqr = s.quantile(0.75) - s.quantile(0.25)
+            if iqr > 0 and ((s < s.quantile(0.25) - 1.5 * iqr) | (s > s.quantile(0.75) + 1.5 * iqr)).any():
+                has_outliers = True
+                break
 
-            for model_name in target_models:
-                for k in k_range:
-                    run_key = f"{space_name}__{model_name}__k{k}"
+        kmedoids_reason = "costo viable para este tamaño"
+        if has_outliers:
+            kmedoids_reason += "\n- se detectaron variables robust-scaled/outliers"
 
-                    if model_name in ("kmeans", "k-means"):
-                        model = KMeans(
-                            n_clusters=k,
-                            n_init=n_init,
-                            max_iter=max_iter,
-                            tol=tol,
-                            random_state=base_seed,
-                            **kwargs
-                        )
-                        labels = model.fit_predict(X)
+        dbscan_reason = "puede identificar observaciones aisladas"
+        if n_samples >= 50:
+            dbscan_reason += "\n- muestra suficiente para explorar densidad"
 
-                    elif model_name in ("hierarchical", "agglomerative"):
-                        linkage = kwargs.get("linkage", "ward")
-                        model = AgglomerativeClustering(
-                            n_clusters=k,
-                            linkage=linkage
-                        )
-                        labels = model.fit_predict(X)
+        plan_records = [
+            {
+                "step": 1,
+                "role": "baseline",
+                "model": "kmeans",
+                "priority_label": "Exploratory",
+                "available": True,
+                "reason": "baseline interpretable",
+                "experiment_purpose": "Establish a fast, interpretable centroid benchmark."
+            },
+            {
+                "step": 2,
+                "role": "robust alternative",
+                "model": "kmedoids",
+                "priority_label": "High" if has_outliers else "Recommended",
+                "available": kmedoids_avail,
+                "reason": kmedoids_reason,
+                "experiment_purpose": "Test a medoid solution that is less sensitive to extreme observations."
+            },
+            {
+                "step": 3,
+                "role": "hierarchical alternative",
+                "model": "agglomerative",
+                "priority_label": "Recommended" if n_samples <= 2500 else "Conditional",
+                "available": True,
+                "reason": "dataset pequeño/mediano" if n_samples <= 2500 else "dataset grande (costo O(n^2))",
+                "experiment_purpose": "Test whether a nested or linkage-based structure better represents the sample."
+            },
+            {
+                "step": 4,
+                "role": "probabilistic alternative",
+                "model": "gaussian_mixture",
+                "priority_label": "Exploratory",
+                "available": True,
+                "reason": "evalúa pertenencia probabilística",
+                "experiment_purpose": "Test elliptical clusters and soft membership probabilities."
+            },
+            {
+                "step": 5,
+                "role": "density/noise diagnostic",
+                "model": "dbscan",
+                "priority_label": "Recommended" if n_features <= 15 else "Caution",
+                "available": True,
+                "reason": dbscan_reason,
+                "experiment_purpose": "Test irregular shapes and whether isolated observations should be treated as noise."
+            },
+            {
+                "step": 6,
+                "role": "variable-density diagnostic",
+                "model": "hdbscan",
+                "priority_label": "Exploratory",
+                "available": hdbscan_avail,
+                "reason": "puede explorar densidades variables",
+                "experiment_purpose": "Explore density-varying groups and noise without fixing k."
+            }
+        ]
+        plan_df = pd.DataFrame(plan_records)
 
-                    elif model_name in ("gmm", "gaussian_mixture"):
-                        model = GaussianMixture(
-                            n_components=k,
-                            n_init=min(n_init, 10),
-                            max_iter=max_iter,
-                            tol=tol,
-                            random_state=base_seed,
-                            **kwargs
-                        )
-                        labels = model.fit_predict(X)
+        if verbose:
+            print("========== CLUSTERING EXPERIMENT PLAN ==========")
+            with pd.option_context("display.max_colwidth", None):
+                try:
+                    display(plan_df.style.set_properties(**{"white-space": "pre-wrap", "text-align": "left"}))
+                except Exception:
+                    display(plan_df)
+            print("Note: this is a test plan, not a model ranking. Use plan.run() for the competition.\n")
 
-                    else:
-                        continue
+        # 2. Motor de ejecución del torneo completo (Fase 2)
+        def _execute_runner() -> Dict[str, Any]:
+            if "embed" not in self.manager.registry:
+                self.manager.registry["embed"] = self.data
 
-                    sil = float(silhouette_score(X, labels))
-                    ch = float(calinski_harabasz_score(X, labels))
-                    db = float(davies_bouldin_score(X, labels))
+            valid_spaces = [s for s in spaces if s in self.manager.registry]
+            if not valid_spaces:
+                raise ValueError(f"Ninguno de los espacios {spaces} existe en el registro.")
 
-                    row = {
-                        "space": space_name,
-                        "model": model_name,
-                        "k": k,
-                        "silhouette": round(sil, 4),
-                        "calinski_harabasz": round(ch, 2),
-                        "davies_bouldin": round(db, 4),
-                    }
+            run_all_recommended = (models == "recommended")
+            selected_models = [m.lower() for m in models] if isinstance(models, list) else ([models.lower()] if not run_all_recommended else [])
 
-                    if evaluate_stability and n_stability_runs > 1:
-                        seed_runs = []
-                        for s_idx in range(n_stability_runs):
-                            current_seed = base_seed + (s_idx * 17)
-                            if model_name in ("kmeans", "k-means"):
-                                m_stab = KMeans(
-                                    n_clusters=k,
-                                    n_init=max(2, n_init // 5),
-                                    max_iter=max_iter,
-                                    tol=tol,
-                                    random_state=current_seed
-                                )
-                                seed_runs.append(m_stab.fit_predict(X))
-                            elif model_name in ("gmm", "gaussian_mixture"):
-                                m_stab = GaussianMixture(
-                                    n_components=k,
-                                    n_init=1,
-                                    max_iter=max_iter,
-                                    tol=tol,
-                                    random_state=current_seed
-                                )
-                                seed_runs.append(m_stab.fit_predict(X))
-                            elif model_name in ("hierarchical", "agglomerative"):
-                                rng = np.random.RandomState(current_seed)
-                                sub_idx = rng.choice(len(X), size=int(0.9 * len(X)), replace=False)
-                                m_stab = AgglomerativeClustering(n_clusters=k, linkage=kwargs.get("linkage", "ward"))
-                                sub_lbl = m_stab.fit_predict(X.iloc[sub_idx])
-                                seed_runs.append((sub_idx, sub_lbl))
+            base_seed = master_seed or random_state or 42
+            raw_runs = []
+            fitted_models: Dict[str, Any] = {}
+            labels_by_run: Dict[str, np.ndarray] = {}
 
-                        if model_name in ("hierarchical", "agglomerative"):
-                            ari_scores = []
-                            for (idx_a, lbl_a), (idx_b, lbl_b) in itertools.combinations(seed_runs, 2):
-                                common = np.intersect1d(idx_a, idx_b)
-                                if len(common) > 0:
-                                    pos_a = [np.where(idx_a == c)[0][0] for c in common]
-                                    pos_b = [np.where(idx_b == c)[0][0] for c in common]
-                                    ari_scores.append(adjusted_rand_score(lbl_a[pos_a], lbl_b[pos_b]))
-                            row["stability"] = round(float(np.mean(ari_scores)), 4) if ari_scores else 1.0
-                        else:
-                            ari_scores = [
-                                adjusted_rand_score(seed_runs[i], seed_runs[j])
-                                for i, j in itertools.combinations(range(len(seed_runs)), 2)
-                            ]
-                            row["stability"] = round(float(np.mean(ari_scores)), 4) if ari_scores else 1.0
+            for space_name in valid_spaces:
+                X = self.manager.registry[space_name]
+                n_rows = len(X)
 
-                    if self.validation_label is not None:
-                        val_idx = self.validation_label.dropna().index.intersection(X.index)
-                        if len(val_idx) > 0:
-                            y_true = self.validation_label.loc[val_idx]
-                            y_pred = labels[X.index.get_indexer(val_idx)]
-                            row["ari"] = round(float(adjusted_rand_score(y_true, y_pred)), 4)
-                            row["nmi"] = round(float(normalized_mutual_info_score(y_true, y_pred)), 4)
+                # --- A. K-MEANS ---
+                if run_all_recommended or "kmeans" in selected_models:
+                    for k in k_range:
+                        params = {"k": k, "n_init": n_init, "max_iter": max_iter, "tol": tol, "random_state": base_seed}
+                        m = KMeans(n_clusters=k, n_init=n_init, max_iter=max_iter, tol=tol, random_state=base_seed)
+                        lbl = m.fit_predict(X)
+                        
+                        stab = 1.0
+                        if evaluate_stability and n_stability_runs > 1:
+                            sub_aris = []
+                            for s in range(n_stability_runs):
+                                m_s = KMeans(n_clusters=k, n_init=max(2, n_init // 5), max_iter=max_iter, random_state=base_seed + s * 17)
+                                sub_aris.append(adjusted_rand_score(lbl, m_s.fit_predict(X)))
+                            stab = float(np.mean(sub_aris))
 
-                    records.append(row)
-                    fitted_models[run_key] = model
-                    labels_by_run[run_key] = labels
+                        k_key = f"{space_name}__kmeans__k{k}"
+                        fitted_models[k_key] = m
+                        labels_by_run[k_key] = lbl
+                        raw_runs.append({"space": space_name, "model": "kmeans", "params": params, "labels": lbl, "stability_ari": stab, "model_obj": m, "run_key": k_key})
 
-        leaderboard_df = pd.DataFrame(records)
-        if not leaderboard_df.empty:
-            leaderboard_df = leaderboard_df.sort_values(by="silhouette", ascending=False).reset_index(drop=True)
+                # --- B. K-MEDOIDS ---
+                if (run_all_recommended or "kmedoids" in selected_models) and kmedoids_avail:
+                    for metric in ["euclidean", "manhattan"]:
+                        for k in k_range:
+                            params = {"k": k, "metric": metric, "max_iter": max_iter, "random_state": base_seed}
+                            try:
+                                if kmedoids_driver == "sklearn_extra":
+                                    from sklearn_extra.cluster import KMedoids
+                                    m = KMedoids(n_clusters=k, metric=metric, max_iter=max_iter, random_state=base_seed)
+                                    lbl = m.fit_predict(X)
+                                else:
+                                    import kmedoids
+                                    from scipy.spatial.distance import pdist, squareform
+                                    D = squareform(pdist(X, metric=metric))
+                                    res = kmedoids.fasterpam(D, k, random_state=base_seed)
+                                    lbl = np.asarray(res.labels)
+                                    m = res
 
-        best_key = (
-            f"{leaderboard_df.iloc[0]['space']}__{leaderboard_df.iloc[0]['model']}__k{int(leaderboard_df.iloc[0]['k'])}"
-            if not leaderboard_df.empty else None
-        )
+                                stab = 1.0
+                                if evaluate_stability and n_stability_runs > 1 and kmedoids_driver == "sklearn_extra":
+                                    sub_aris = []
+                                    for s in range(n_stability_runs):
+                                        m_s = KMedoids(n_clusters=k, metric=metric, max_iter=max_iter, random_state=base_seed + s * 17)
+                                        sub_aris.append(adjusted_rand_score(lbl, m_s.fit_predict(X)))
+                                    stab = float(np.mean(sub_aris))
 
-        result = ExperimentResult({
-            "leaderboard": leaderboard_df,
-            "models": fitted_models,
-            "labels": labels_by_run,
-            "best_config": leaderboard_df.iloc[0].to_dict() if not leaderboard_df.empty else {},
-            "best_model": fitted_models.get(best_key),
-            "spaces": {s: self.manager.registry[s] for s in valid_spaces}
-        })
+                                km_key = f"{space_name}__kmedoids__{metric}__k{k}"
+                                fitted_models[km_key] = m
+                                labels_by_run[km_key] = lbl
+                                raw_runs.append({"space": space_name, "model": "kmedoids", "params": params, "labels": lbl, "stability_ari": stab, "model_obj": m, "run_key": km_key})
+                            except Exception:
+                                pass
 
+                # --- C. AGGLOMERATIVE ---
+                if run_all_recommended or "agglomerative" in selected_models:
+                    for k in k_range:
+                        params = {"k": k, "linkage": "ward", "metric": "euclidean"}
+                        m = AgglomerativeClustering(n_clusters=k, linkage="ward")
+                        lbl = m.fit_predict(X)
+
+                        stab = 1.0
+                        if evaluate_stability and n_stability_runs > 1:
+                            rng = np.random.RandomState(base_seed)
+                            sub_aris = []
+                            for _ in range(n_stability_runs):
+                                sub_idx = rng.choice(n_rows, size=int(0.85 * n_rows), replace=False)
+                                m_s = AgglomerativeClustering(n_clusters=k, linkage="ward")
+                                sub_aris.append(adjusted_rand_score(lbl[sub_idx], m_s.fit_predict(X.iloc[sub_idx])))
+                            stab = float(np.mean(sub_aris)) if sub_aris else 1.0
+
+                        agg_key = f"{space_name}__agglomerative__k{k}"
+                        fitted_models[agg_key] = m
+                        labels_by_run[agg_key] = lbl
+                        raw_runs.append({"space": space_name, "model": "agglomerative", "params": params, "labels": lbl, "stability_ari": stab, "model_obj": m, "run_key": agg_key})
+
+                # --- D. GAUSSIAN MIXTURE ---
+                if run_all_recommended or "gaussian_mixture" in selected_models:
+                    for cov in ["full", "diag"]:
+                        for k in k_range:
+                            params = {"k": k, "covariance_type": cov, "n_init": 10, "max_iter": max_iter, "random_state": base_seed}
+                            m = GaussianMixture(n_components=k, covariance_type=cov, n_init=min(n_init, 10), max_iter=max_iter, random_state=base_seed)
+                            lbl = m.fit_predict(X)
+
+                            stab = 1.0
+                            if evaluate_stability and n_stability_runs > 1:
+                                sub_aris = []
+                                for s in range(n_stability_runs):
+                                    m_s = GaussianMixture(n_components=k, covariance_type=cov, n_init=1, max_iter=max_iter, random_state=base_seed + s * 17)
+                                    sub_aris.append(adjusted_rand_score(lbl, m_s.fit_predict(X)))
+                                stab = float(np.mean(sub_aris))
+
+                            gmm_key = f"{space_name}__gaussian_mixture__{cov}__k{k}"
+                            fitted_models[gmm_key] = m
+                            labels_by_run[gmm_key] = lbl
+                            raw_runs.append({"space": space_name, "model": "gaussian_mixture", "params": params, "labels": lbl, "stability_ari": stab, "model_obj": m, "run_key": gmm_key})
+
+                # --- E. DBSCAN ---
+                if run_all_recommended or "dbscan" in selected_models:
+                    for ms in [4, 5, 10]:
+                        if ms < n_rows:
+                            nn = NearestNeighbors(n_neighbors=ms).fit(X)
+                            dists, _ = nn.kneighbors(X)
+                            k_d = np.sort(dists[:, -1])
+                            eps_list = np.unique([float(np.percentile(k_d, p)) for p in [70, 80, 85, 90, 95]])
+                            for eps_val in eps_list:
+                                if eps_val <= 0:
+                                    continue
+                                params = {"eps": eps_val, "min_samples": ms, "metric": "euclidean"}
+                                m = DBSCAN(eps=eps_val, min_samples=ms)
+                                lbl = m.fit_predict(X)
+                                db_key = f"{space_name}__dbscan__ms{ms}__eps{round(eps_val, 3)}"
+                                fitted_models[db_key] = m
+                                labels_by_run[db_key] = lbl
+                                raw_runs.append({"space": space_name, "model": "dbscan", "params": params, "labels": lbl, "stability_ari": 1.0, "model_obj": m, "run_key": db_key})
+
+                # --- F. HDBSCAN ---
+                if (run_all_recommended or "hdbscan" in selected_models) and hdbscan_cls is not None:
+                    for mcs in [5, 10]:
+                        if mcs < n_rows:
+                            params = {"min_cluster_size": mcs, "min_samples": None}
+                            try:
+                                m = hdbscan_cls(min_cluster_size=mcs)
+                                lbl = m.fit_predict(X)
+                                hdb_key = f"{space_name}__hdbscan__mcs{mcs}"
+                                fitted_models[hdb_key] = m
+                                labels_by_run[hdb_key] = lbl
+                                raw_runs.append({"space": space_name, "model": "hdbscan", "params": params, "labels": lbl, "stability_ari": 1.0, "model_obj": m, "run_key": hdb_key})
+                            except Exception:
+                                pass
+
+            # 3. Consolidar métricas geométricas
+            processed_runs = []
+            for r in raw_runs:
+                lbl = np.asarray(r["labels"])
+                noise_mask = (lbl == -1)
+                noise_pct = float((noise_mask.sum() / len(lbl)) * 100)
+                clean_lbl = lbl[~noise_mask]
+                unique_cl = np.unique(clean_lbl)
+                n_clusters = len(unique_cl)
+
+                if n_clusters < 2:
+                    continue
+
+                clean_X = self.manager.registry[r["space"]][~noise_mask]
+                sil = float(silhouette_score(clean_X, clean_lbl))
+                ch = float(calinski_harabasz_score(clean_X, clean_lbl))
+                db = float(davies_bouldin_score(clean_X, clean_lbl))
+
+                counts = pd.Series(clean_lbl).value_counts()
+                min_cl_pct = float((counts.min() / len(lbl)) * 100)
+
+                processed_runs.append({
+                    "space": r["space"],
+                    "model": r["model"],
+                    "params": r["params"],
+                    "n_clusters": int(n_clusters),
+                    "silhouette": round(sil, 6),
+                    "calinski_harabasz": round(ch, 6),
+                    "davies_bouldin": round(db, 6),
+                    "stability_ari": round(float(r["stability_ari"]), 6),
+                    "noise_pct": round(noise_pct, 6),
+                    "min_cluster_pct": round(min_cl_pct, 6),
+                    "run_key": r["run_key"]
+                })
+
+            leaderboard_df = pd.DataFrame(processed_runs)
+            if not leaderboard_df.empty:
+                # Ranking ponderado multi-métrica
+                r_sil = leaderboard_df["silhouette"].rank(ascending=False, method="min")
+                r_ch = leaderboard_df["calinski_harabasz"].rank(ascending=False, method="min")
+                r_db = leaderboard_df["davies_bouldin"].rank(ascending=True, method="min")
+                r_stab = leaderboard_df["stability_ari"].rank(ascending=False, method="min")
+                r_noise = leaderboard_df["noise_pct"].rank(ascending=True, method="min")
+
+                leaderboard_df["competition_score"] = ((r_sil + r_ch + r_db + r_stab + r_noise) / 5.0).round(1)
+                leaderboard_df = leaderboard_df.sort_values(
+                    by=["competition_score", "silhouette"],
+                    ascending=[True, False]
+                ).reset_index(drop=True)
+
+                leaderboard_df.insert(0, "rank", leaderboard_df.index + 1)
+                best_key = leaderboard_df.iloc[0]["run_key"]
+            else:
+                best_key = None
+
+            return {
+                "leaderboard": leaderboard_df,
+                "models": fitted_models,
+                "labels": labels_by_run,
+                "best_config": leaderboard_df.iloc[0].to_dict() if not leaderboard_df.empty else {},
+                "best_model": fitted_models.get(best_key),
+                "spaces": {s: self.manager.registry[s] for s in valid_spaces}
+            }
+
+        result = ExperimentResult(runner_fn=_execute_runner, plan_df=plan_df)
         self.last_experiment = result
-
-        print("\n" + "=" * 60)
-        print("✓ EXPERIMENT LEADERBOARD GENERATED")
-        print("=" * 60)
-        if not leaderboard_df.empty:
-            best = leaderboard_df.iloc[0]
-            print(f"- Mejor combinación global: Espacio '{best['space']}' | Modelo '{best['model']}' | k={int(best['k'])}")
-            print(f"- Silhouette Score: {best['silhouette']:.4f} | Davies-Bouldin: {best['davies_bouldin']:.4f}")
-            if "stability" in best:
-                print(f"- Stability Score (ARI): {best['stability']:.4f}")
-        print("=" * 60)
-
         return result
