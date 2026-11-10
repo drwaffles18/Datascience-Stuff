@@ -6,6 +6,7 @@ from .supervised import (
     ClassificationTournament,
     SupervisedClassification,
     RegressionTournament,
+    SupervisedRegression,
 )
 from .timeseries import TimeSeriesDiagnostics, TimeSeriesFeatureExtractor, TimeSeriesTournament
 from .visualization import plot_radar_comparison, plot_embedding_clusters
@@ -23,6 +24,7 @@ __all__ = [
     "ClassificationTournament",
     "SupervisedClassification",
     "RegressionTournament",
+    "SupervisedRegression",
     "TimeSeriesDiagnostics",
     "TimeSeriesFeatureExtractor",
     "TimeSeriesTournament",

@@ -1,11 +1,9 @@
-from .classification import ClassificationTournament
-from .regression import RegressionTournament
-
-# Alias para compatibilidad hacia atrás con los notebooks anteriores
-SupervisedClassification = ClassificationTournament
+from .classification import ClassificationTournament, SupervisedClassification
+from .regression import RegressionTournament, SupervisedRegression
 
 __all__ = [
     "ClassificationTournament",
     "SupervisedClassification",
     "RegressionTournament",
+    "SupervisedRegression",
 ]
