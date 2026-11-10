@@ -7,6 +7,7 @@ datascience_toolkit.egg-info/dependency_links.txt
 datascience_toolkit.egg-info/requires.txt
 datascience_toolkit.egg-info/top_level.txt
 datascience_toolkit/eda/__init__.py
+datascience_toolkit/eda/advanced.py
 datascience_toolkit/eda/quick.py
 datascience_toolkit/marketing/__init__.py
 datascience_toolkit/marketing/exporters.py
