@@ -16,3 +16,12 @@ __pycache__/
 *.parquet
 *.xlsx
 outputs_*/
+
+# Modelos serializados y binarios
+*.pkl
+*.joblib
+*.binpb
+*.zip
+
+# Salidas de modelos / experimentos
+*outputs*/
