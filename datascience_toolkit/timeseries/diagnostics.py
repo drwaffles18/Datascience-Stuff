@@ -1,13 +1,13 @@
 """
 diagnostics.py
 ==============
-Statistical diagnostics for time series: Stationarity tests (ADF, KPSS),
-autocorrelation profiling, and seasonality indicators.
+Statistical diagnostics and spectral periodogram analysis for time series.
 """
 
-from typing import Dict, Any, Optional
+from typing import Optional
 import numpy as np
 import pandas as pd
+from scipy import signal
 
 try:
     from statsmodels.tsa.stattools import adfuller, kpss, acf, pacf
@@ -16,16 +16,30 @@ except ImportError:
     STATSMODELS_AVAILABLE = False
 
 
+class PeriodogramHelper:
+    """Spectral periodogram helper to detect dominant seasonal periods."""
+
+    def __init__(self, ts: pd.Series):
+        self.ts = ts.astype(float).values
+        self.freq, self.spec = signal.periodogram(self.ts)
+
+    def best_freq(self, best: int = 3) -> np.ndarray:
+        res = np.argsort(-self.spec)
+        res = res[(res != 0) & (res != 1)]
+        res = res[:best]
+        return self.freq[res]
+
+    def best_periods(self, best: int = 3) -> np.ndarray:
+        f = self.best_freq(best=best)
+        f = np.where(f == 0, np.nan, f)
+        return 1.0 / f
+
+
 class TimeSeriesDiagnostics:
     """Diagnostic suite for temporal stationarity and autocorrelation structures."""
 
     @staticmethod
     def stationarity_test(series: pd.Series, significance: float = 0.05) -> pd.DataFrame:
-        """
-        Runs Augmented Dickey-Fuller (ADF) and KPSS tests.
-        ADF H0: Series has a unit root (Non-stationary).
-        KPSS H0: Series is trend/level stationary.
-        """
         clean_s = series.dropna()
         if len(clean_s) < 15:
             raise ValueError("Series length must be at least 15 observations for stationarity tests.")
@@ -39,12 +53,10 @@ class TimeSeriesDiagnostics:
                 "conclusion": "Install statsmodels (pip install statsmodels) to run ADF and KPSS tests."
             }])
 
-        # 1. ADF Test
         adf_res = adfuller(clean_s, autolag="AIC")
         adf_stat, adf_pvalue = adf_res[0], adf_res[1]
         adf_stationary = adf_pvalue < significance
 
-        # 2. KPSS Test
         kpss_res = kpss(clean_s, regression="c", nlags="auto")
         kpss_stat, kpss_pvalue = kpss_res[0], kpss_res[1]
         kpss_stationary = kpss_pvalue >= significance
@@ -71,10 +83,8 @@ class TimeSeriesDiagnostics:
 
     @staticmethod
     def autocorrelation_summary(series: pd.Series, nlags: int = 10) -> pd.DataFrame:
-        """Computes Autocorrelation (ACF) and Partial Autocorrelation (PACF) values per lag."""
         clean_s = series.dropna()
         if not STATSMODELS_AVAILABLE:
-            # Fallback using pure pandas for basic ACF
             lags = list(range(1, nlags + 1))
             acf_vals = [round(float(clean_s.autocorr(lag=lag)), 4) for lag in lags]
             return pd.DataFrame({"lag": lags, "autocorrelation": acf_vals})

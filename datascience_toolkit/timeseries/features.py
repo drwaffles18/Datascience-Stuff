@@ -2,12 +2,26 @@
 features.py
 ===========
 Feature engineering for time-indexed data: Lags, rolling window aggregates,
-and cyclical calendar encoding.
+cyclical calendar encoding, and future DatetimeIndex projection.
 """
 
 from typing import List, Optional
 import numpy as np
 import pandas as pd
+
+
+def _future_index(idx: pd.DatetimeIndex, steps: int) -> pd.DatetimeIndex:
+    """Generates future DatetimeIndex steps preserving or inferring frequency."""
+    if getattr(idx, "freq", None) is None:
+        freq = pd.infer_freq(idx)
+        if freq is None:
+            raise ValueError("No se pudo inferir frecuencia del DatetimeIndex. Define freq en to_series().")
+    else:
+        freq = idx.freq
+
+    start = idx[-1]
+    future = pd.date_range(start=start, periods=int(steps) + 1, freq=freq)
+    return future[1:]
 
 
 class TimeSeriesFeatureExtractor:
@@ -19,7 +33,6 @@ class TimeSeriesFeatureExtractor:
         date_col: Optional[str] = None,
         cyclical_encoding: bool = True
     ) -> pd.DataFrame:
-        """Decomposes datetime index or column into calendar attributes with cyclical sin/cos transformations."""
         out = df.copy()
 
         if date_col:
@@ -37,11 +50,8 @@ class TimeSeriesFeatureExtractor:
         out["is_weekend"] = dt_series.dt.dayofweek.isin([5, 6]).astype(int)
 
         if cyclical_encoding:
-            # Month cyclical encoding (1 to 12)
             out["month_sin"] = np.round(np.sin(2 * np.pi * dt_series.dt.month / 12), 4)
             out["month_cos"] = np.round(np.cos(2 * np.pi * dt_series.dt.month / 12), 4)
-
-            # Day of week cyclical encoding (0 to 6)
             out["dow_sin"] = np.round(np.sin(2 * np.pi * dt_series.dt.dayofweek / 7), 4)
             out["dow_cos"] = np.round(np.cos(2 * np.pi * dt_series.dt.dayofweek / 7), 4)
 
@@ -53,7 +63,6 @@ class TimeSeriesFeatureExtractor:
         target_col: str,
         lags: List[int] = [1, 2, 7, 14]
     ) -> pd.DataFrame:
-        """Constructs temporal autoregressive lags for a target feature."""
         out = df.copy()
         for lag in lags:
             out[f"{target_col}_lag_{lag}"] = out[target_col].shift(lag)
@@ -66,7 +75,6 @@ class TimeSeriesFeatureExtractor:
         windows: List[int] = [7, 14, 30],
         aggregates: List[str] = ["mean", "std", "min", "max"]
     ) -> pd.DataFrame:
-        """Constructs rolling window aggregates shifted by 1 period to prevent data leakage."""
         out = df.copy()
         shifted_target = out[target_col].shift(1)
 

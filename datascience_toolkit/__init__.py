@@ -8,7 +8,12 @@ from .supervised import (
     RegressionTournament,
     SupervisedRegression,
 )
-from .timeseries import TimeSeriesDiagnostics, TimeSeriesFeatureExtractor, TimeSeriesTournament
+from .timeseries import (
+    TimeSeriesDiagnostics,
+    TimeSeriesFeatureExtractor,
+    TimeSeriesForecaster,
+    TimeSeriesTournament,
+)
 from .visualization import plot_radar_comparison, plot_embedding_clusters
 
 __all__ = [
@@ -30,4 +35,8 @@ __all__ = [
     "TimeSeriesTournament",
     "plot_radar_comparison",
     "plot_embedding_clusters",
+    "TimeSeriesDiagnostics",
+    "TimeSeriesFeatureExtractor",
+    "TimeSeriesForecaster",
+    "TimeSeriesTournament",
 ]
